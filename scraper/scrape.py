@@ -1,6 +1,10 @@
 """
-TicketSwap prijsscraper – Ploegendienst & Oranje Zoet 2026
-Draait via GitHub Actions elke 2 uur.
+TicketSwap doorverkoop prijsscraper – Ploegendienst & Oranje Zoet 2026
+Draait via GitHub Actions elke 30 minuten.
+
+Strategie:
+1. Onderschep TicketSwap API/GraphQL-responses → meest betrouwbaar
+2. HTML fallback: zoek alleen in listing-kaarten, sla officiële prijs over
 """
 
 import asyncio
@@ -16,113 +20,191 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 
-async def get_lowest_price_per_ticket(page, url: str) -> float | None:
+# ─── Prijs scrapen ────────────────────────────────────────────────────────────
+
+async def get_lowest_resale_price(page, url: str) -> float | None:
     """
-    Haalt de laagste beschikbare ticketprijs op van een TicketSwap-pagina
-    en geeft de prijs per ticket terug.
+    Haalt de laagste doorverkoop-prijs per ticket op van een TicketSwap-pagina.
+    Gebruikt eerst API-interceptie, dan HTML-fallback gericht op listing-kaarten.
     """
+    api_prices: list[float] = []
+
+    async def on_response(response):
+        """Onderschep JSON-responses van TicketSwap en zoek naar prijzen."""
+        try:
+            if response.status != 200:
+                return
+            url_r = response.url
+            ct = response.headers.get("content-type", "")
+            if "json" not in ct:
+                return
+            if "ticketswap" not in url_r:
+                return
+            body = await response.json()
+            _extract_prices_from_json(body, api_prices)
+        except Exception:
+            pass
+
+    page.on("response", on_response)
     try:
         print(f"  → Navigeren naar: {url}")
         await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        # Wacht totdat de dynamische content is geladen
-        await page.wait_for_timeout(4000)
+        # Geef tijd voor API-calls en dynamische rendering
+        await page.wait_for_timeout(5000)
+    finally:
+        page.remove_listener("response", on_response)
 
-        # Probeer te wachten op ticketlijst
-        try:
-            await page.wait_for_selector(
-                "[class*='listing'], [class*='ticket'], [data-testid*='listing']",
-                timeout=10000,
-            )
-        except Exception:
-            pass  # Ga door ook als selector niet gevonden wordt
+    # ── Poging 1: API-interceptie ──────────────────────────────────────────
+    if api_prices:
+        # TicketSwap stuurt prijzen soms in centen (bv. 4500 = €45,00)
+        as_euros_cents = [p / 100 for p in api_prices if 500 <= p <= 50_000]
+        as_euros_direct = [p for p in api_prices if 5 <= p <= 500]
 
-        prices = []
+        candidates = as_euros_cents if as_euros_cents else as_euros_direct
+        if candidates:
+            result = round(min(candidates), 2)
+            print(f"  ✓ Laagste doorverkoop (API): €{result:.2f} per ticket")
+            return result
 
-        # Strategie 1: zoek elementen met price in class of data-testid
-        price_els = await page.query_selector_all(
-            "[class*='price'], [data-testid*='price'], [class*='Price']"
-        )
-        for el in price_els:
-            try:
-                text = await el.inner_text()
-                found = _parse_prices(text)
-                prices.extend(found)
-            except Exception:
-                pass
+    # ── Poging 2: HTML gericht op listing-kaarten ──────────────────────────
+    print("  ⚠ Geen bruikbare API-data, HTML-fallback gebruiken...")
+    return await _html_listing_prices(page)
 
-        # Strategie 2: zoek listing-/ticket-elementen en scan hun tekst
-        if not prices:
-            listing_els = await page.query_selector_all(
-                "li[class], article[class], [class*='listing'], [class*='ticket-item']"
-            )
-            for el in listing_els:
-                try:
-                    text = await el.inner_text()
-                    found = _parse_prices(text)
-                    prices.extend(found)
-                except Exception:
-                    pass
 
-        # Strategie 3: scan de volledige paginatekst als fallback
-        if not prices:
-            body_text = await page.inner_text("body")
-            prices = _parse_prices(body_text)
+def _extract_prices_from_json(obj, results: list, depth: int = 0) -> None:
+    """Doorzoekt JSON recursief op bekende prijs-sleutels van TicketSwap."""
+    if depth > 10:
+        return
+    price_keys = {
+        "amount", "price", "totalprice", "sellerprice",
+        "totalpricetransactionfee", "priceperticket",
+        "value", "cents", "total", "originalamount",
+    }
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k.lower() in price_keys and isinstance(v, (int, float)) and v > 0:
+                results.append(float(v))
+            else:
+                _extract_prices_from_json(v, results, depth + 1)
+    elif isinstance(obj, list):
+        for item in obj:
+            _extract_prices_from_json(item, results, depth + 1)
 
-        if not prices:
-            print("  ✗ Geen prijzen gevonden op pagina")
-            return None
 
-        min_price = round(min(prices), 2)
-        print(f"  ✓ Laagste prijs per ticket: €{min_price:.2f}")
-        return min_price
+async def _html_listing_prices(page) -> float | None:
+    """
+    HTML-fallback: zoek prijzen in listing-kaarten en sla de
+    'Originele prijs' (officiële face value) over.
+    """
+    try:
+        prices: list[float] = await page.evaluate("""() => {
+            const prices = [];
+            const pricePattern = /\u20ac\\s*(\\d{1,3})(?:[,.](\\d{2}))/g;
+
+            // Stap 1: zoek listing-containers op basis van bekende TicketSwap-patronen
+            const containerSelectors = [
+                '[data-testid*="listing"]',
+                '[class*="ListingCard"]',
+                '[class*="listing-card"]',
+                '[class*="TicketListing"]',
+                '[class*="ticket-listing"]',
+                'ul[class*="list"] > li',
+                'ol[class*="list"] > li',
+            ];
+
+            let cards = [];
+            for (const sel of containerSelectors) {
+                cards = [...document.querySelectorAll(sel)];
+                if (cards.length > 0) break;
+            }
+
+            if (cards.length > 0) {
+                for (const card of cards) {
+                    const text = card.innerText || '';
+                    // Sla over als dit de officiële-prijs-sectie is
+                    if (/originele\\s*prijs|face\\s*value|official\\s*price/i.test(text)
+                        && cards.length === 1) continue;
+
+                    let m;
+                    pricePattern.lastIndex = 0;
+                    while ((m = pricePattern.exec(text)) !== null) {
+                        const price = parseFloat(m[1] + '.' + (m[2] || '00'));
+                        if (price > 5 && price < 500) prices.push(price);
+                    }
+                }
+                if (prices.length > 0) return prices;
+            }
+
+            // Stap 2: scan hele pagina maar skip 'originele prijs'-context
+            const walker = document.createTreeWalker(
+                document.body, NodeFilter.SHOW_TEXT
+            );
+            while (walker.nextNode()) {
+                const node = walker.currentNode;
+                const text = node.textContent.trim();
+                if (!/^\u20ac/.test(text) && !text.startsWith('€')) continue;
+
+                // Controleer of ouder-elementen 'originele prijs' bevatten
+                let el = node.parentElement;
+                let skip = false;
+                for (let i = 0; i < 4; i++) {
+                    if (!el) break;
+                    const cls = (el.className || '').toLowerCase();
+                    const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                    if (cls.includes('original') || cls.includes('facevalue')
+                        || label.includes('original') || label.includes('face')) {
+                        skip = true; break;
+                    }
+                    el = el.parentElement;
+                }
+                if (skip) continue;
+
+                pricePattern.lastIndex = 0;
+                let m2;
+                while ((m2 = pricePattern.exec(text)) !== null) {
+                    const price = parseFloat(m2[1] + '.' + (m2[2] || '00'));
+                    if (price > 5 && price < 500) prices.push(price);
+                }
+            }
+            return prices;
+        }""")
+
+        if prices:
+            result = round(min(prices), 2)
+            print(f"  ✓ Laagste doorverkoop (HTML): €{result:.2f} per ticket")
+            return result
+
+        print("  ✗ Geen doorverkoop-prijzen gevonden")
+        return None
 
     except Exception as exc:
-        print(f"  ✗ Fout bij scrapen van {url}: {exc}")
+        print(f"  ✗ HTML-fallback fout: {exc}")
         return None
 
 
-def _parse_prices(text: str) -> list[float]:
-    """Extraheert alle geldige ticketprijzen (€5–€500) uit een stuk tekst."""
-    prices = []
-    # Matcht: €45,00 / € 45.00 / 45,00 / 45.00
-    for m in re.finditer(r"(?:€\s*)?(\d{1,3})(?:[,\.](\d{2}))\b", text):
-        euro_part = int(m.group(1))
-        cent_part = int(m.group(2)) if m.group(2) else 0
-        price = euro_part + cent_part / 100
-        if 5 < price < 500:
-            prices.append(price)
-    return prices
-
+# ─── Alert cooldown ───────────────────────────────────────────────────────────
 
 def _should_send_alert(entries: list[dict], event_key: str) -> bool:
-    """
-    Stuur een alert als:
-    - De vorige meting GEEN alert had verzonden, OF
-    - De laatste alert meer dan 24 uur geleden is.
-    """
+    """Stuur alleen een alert als de vorige alert meer dan 24 uur geleden was."""
     alert_key = f"{event_key}_alerted"
-    if not entries:
-        return True
-    # Zoek de meest recente vermelding met alerted=True
-    for entry in reversed(entries[:-1]):  # sla de nieuwste over (die we nu toevoegen)
+    for entry in reversed(entries):
         if entry.get(alert_key):
             last_ts = datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00"))
-            now = datetime.now(timezone.utc)
-            if now - last_ts < timedelta(hours=24):
-                return False  # Al gewaarschuwd binnen 24 uur
+            if datetime.now(timezone.utc) - last_ts < timedelta(hours=24):
+                return False
             break
     return True
 
 
-def send_alert_email(config: dict, alerts: list[tuple[str, float, float]]):
-    """Verstuurt een e-mailalert als de prijs onder de drempel zakt.
-    alerts = [(event_name, price_2tickets, threshold_per_ticket), ...]
-    """
-    smtp_server = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-    smtp_user = os.environ.get("SMTP_USER", "")
+# ─── E-mail alert ─────────────────────────────────────────────────────────────
+
+def send_alert_email(config: dict, alerts: list[tuple[str, float, float]]) -> None:
+    """alerts = [(naam, prijs_per_ticket, drempel_per_ticket)]"""
+    smtp_server  = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
+    smtp_port    = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_user    = os.environ.get("SMTP_USER", "")
     smtp_password = os.environ.get("SMTP_PASSWORD", "")
-    recipient = config.get("email", "")
+    recipient    = config.get("email", "")
     dashboard_url = config.get("github_pages_url", "#")
 
     if not all([smtp_user, smtp_password, recipient]):
@@ -132,43 +214,37 @@ def send_alert_email(config: dict, alerts: list[tuple[str, float, float]]):
         print("  ⚠ Vul een echt e-mailadres in config.json")
         return
 
-    subject = "🎟 Prijsalert: tickets onder drempel!"
     rows = "".join(
         f"<tr>"
         f"<td style='padding:8px 16px'>{name}</td>"
-        f"<td style='padding:8px 16px; font-weight:bold; color:#ff6b35'>€{price_2:.2f}</td>"
-        f"<td style='padding:8px 16px; color:#888'>€{price_2*2:.2f} voor 2 · drempel €{thr:.2f}/ticket</td>"
+        f"<td style='padding:8px 16px;font-weight:bold;color:#ff6b35'>€{price:.2f} p.p.</td>"
+        f"<td style='padding:8px 16px;color:#888'>2× = €{price*2:.2f} · drempel €{thr:.2f}</td>"
         f"</tr>"
-        for name, price_2, thr in alerts
+        for name, price, thr in alerts
     )
 
-    html_body = f"""
-    <html><body style="font-family:sans-serif;background:#0f0f1a;color:#e0e0e0;padding:2rem">
+    html_body = f"""<html><body style="font-family:sans-serif;background:#0f0f1a;
+        color:#e0e0e0;padding:2rem">
       <div style="max-width:600px;margin:auto;background:#1a1a2e;border-radius:12px;
                   padding:2rem;border:1px solid #2a2a45">
         <h2 style="color:#ff6b35;margin-top:0">🎟 Prijsalert!</h2>
-        <p>De volgende tickets zijn onder jouw drempel gedaald:</p>
+        <p>Doorverkoop-tickets zijn onder jouw drempel gedaald:</p>
         <table style="width:100%;border-collapse:collapse;margin:1rem 0">
-          <thead>
-            <tr style="background:#0f0f1a;color:#888">
-              <th style="padding:8px 16px;text-align:left">Evenement</th>
-              <th style="padding:8px 16px;text-align:left">2 tickets</th>
-              <th style="padding:8px 16px;text-align:left">Per ticket</th>
-            </tr>
-          </thead>
+          <thead><tr style="background:#0f0f1a;color:#888">
+            <th style="padding:8px 16px;text-align:left">Evenement</th>
+            <th style="padding:8px 16px;text-align:left">Per ticket</th>
+            <th style="padding:8px 16px;text-align:left">Totaal</th>
+          </tr></thead>
           <tbody>{rows}</tbody>
         </table>
         <a href="https://{dashboard_url}"
-           style="display:inline-block;background:#ff6b35;color:white;padding:0.75rem 1.5rem;
-                  border-radius:8px;text-decoration:none;font-weight:bold">
-          Bekijk dashboard →
-        </a>
-      </div>
-    </body></html>
-    """
+           style="display:inline-block;background:#ff6b35;color:white;
+                  padding:0.75rem 1.5rem;border-radius:8px;text-decoration:none;
+                  font-weight:bold">Bekijk dashboard →</a>
+      </div></body></html>"""
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
+    msg["Subject"] = "🎟 Prijsalert: doorverkoop-tickets onder drempel!"
     msg["From"] = smtp_user
     msg["To"] = recipient
     msg.attach(MIMEText(html_body, "html"))
@@ -184,16 +260,16 @@ def send_alert_email(config: dict, alerts: list[tuple[str, float, float]]):
         print(f"  ✗ E-mail versturen mislukt: {exc}")
 
 
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
 async def main():
     base_dir = Path(__file__).parent.parent
 
-    # Laad configuratie
     with open(base_dir / "config.json") as f:
         config = json.load(f)
 
     events = config.get("events", {})
 
-    # Laad bestaande prijsdata
     prices_path = base_dir / "data" / "prices.json"
     prices_path.parent.mkdir(exist_ok=True)
     if prices_path.exists() and prices_path.stat().st_size > 2:
@@ -204,7 +280,7 @@ async def main():
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_entry: dict = {"timestamp": now_iso}
-    alerts_to_send: list[tuple[str, float, float]] = []  # (name, price_2tickets, threshold_per_ticket)
+    alerts_to_send: list[tuple[str, float, float]] = []
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -221,33 +297,32 @@ async def main():
 
         for key, event_info in events.items():
             name = event_info.get("name", key)
-            url = event_info.get("url", "")
+            url  = event_info.get("url", "")
             print(f"\n[{name}]")
 
             if not url or "VIND_URL" in url:
-                print("  ⚠ Geen URL ingesteld – sla de juiste TicketSwap-URL op in config.json")
-                new_entry[f"{key}_price"] = None
+                print("  ⚠ Geen URL ingesteld")
+                new_entry[f"{key}_price"]   = None
                 new_entry[f"{key}_alerted"] = False
                 continue
 
-            price = await get_lowest_price_per_ticket(page, url)
-            new_entry[f"{key}_price"] = price  # prijs per ticket
+            price = await get_lowest_resale_price(page, url)
+            new_entry[f"{key}_price"] = price
 
-            threshold_per_ticket = float(event_info.get("threshold", 0))
-
+            threshold = float(event_info.get("threshold", 0))
             alert_flag = False
-            if price is not None and threshold_per_ticket > 0 and price < threshold_per_ticket:
+            if price is not None and threshold > 0 and price < threshold:
                 if _should_send_alert(price_data, key):
-                    alerts_to_send.append((name, price, threshold_per_ticket))
+                    alerts_to_send.append((name, price, threshold))
                     alert_flag = True
-                    print(f"  🔔 Alert: €{price:.2f}/ticket < drempel €{threshold_per_ticket:.2f}/ticket")
+                    print(f"  🔔 Alert: €{price:.2f} < drempel €{threshold:.2f}")
                 else:
-                    print(f"  ℹ Al gewaarschuwd (cooldown actief)")
+                    print("  ℹ Al gewaarschuwd (cooldown actief)")
             new_entry[f"{key}_alerted"] = alert_flag
 
         await browser.close()
 
-    # Voeg nieuwe meting toe en beperk tot laatste 1440 metingen (~30 dagen bij 30min interval)
+    # Bewaar laatste 1440 metingen (~30 dagen bij 30min interval)
     price_data.append(new_entry)
     if len(price_data) > 1440:
         price_data = price_data[-1440:]
@@ -256,7 +331,6 @@ async def main():
         json.dump(price_data, f, indent=2)
     print(f"\n✓ {len(price_data)} metingen opgeslagen in data/prices.json")
 
-    # Stuur alerts
     if alerts_to_send:
         print("\n📧 Alert e-mail versturen...")
         send_alert_email(config, alerts_to_send)
