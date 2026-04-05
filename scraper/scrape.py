@@ -156,7 +156,7 @@ async def get_lowest_resale_price(page, url: str, debug_dir: Path | None = None)
         let searchText = allText;
         if (splitIdx >= 0) {
             // Neem het stuk NA de officiële sectie (begin van volgende alinea)
-            const afterOfficial = allText.indexOf('\n\n', splitIdx + 30);
+            const afterOfficial = allText.indexOf('\\n\\n', splitIdx + 30);
             if (afterOfficial > 0) searchText = allText.substring(afterOfficial);
         }
 
