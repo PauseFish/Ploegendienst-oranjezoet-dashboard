@@ -1,8 +1,9 @@
 """
 TicketSwap doorverkoop prijsscraper – Ploegendienst & Oranje Zoet 2026
 
-Gebruikt playwright-stealth om bot-detectie te omzeilen zodat de
-doorverkoop-listings daadwerkelijk geladen worden.
+Strategie:
+1. Onderschep GraphQL API-responses terwijl de pagina laadt
+2. DOM-scraping als fallback
 """
 
 import asyncio
@@ -19,126 +20,151 @@ from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
 
 
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _extract_prices_from_obj(obj, prices: list, depth: int = 0):
+    """Doorzoek een object recursief op prijsvelden (skip officiële secties)."""
+    if depth > 15 or obj is None:
+        return
+    official_re = re.compile(r"official|face.?value|originele", re.I)
+    if isinstance(obj, list):
+        for item in obj:
+            _extract_prices_from_obj(item, prices, depth + 1)
+    elif isinstance(obj, dict):
+        type_val = str(obj.get("type") or obj.get("__typename") or "")
+        if official_re.search(type_val):
+            return
+        for k, v in obj.items():
+            if official_re.search(k):
+                continue
+            if re.search(r"price|amount|buyer_price|total_price", k, re.I):
+                if isinstance(v, (int, float)) and 5 < v < 500:
+                    prices.append(round(float(v), 2))
+                elif isinstance(v, str):
+                    try:
+                        n = float(v.replace(",", "."))
+                        if 5 < n < 500:
+                            prices.append(round(n, 2))
+                    except ValueError:
+                        pass
+            _extract_prices_from_obj(v, prices, depth + 1)
+
+
 # ─── Scraper ─────────────────────────────────────────────────────────────────
 
 async def get_lowest_resale_price(page, url: str, debug_dir: Path | None = None) -> float | None:
-    """
-    Navigeert naar de TicketSwap-pagina en haalt de laagste doorverkoop-prijs
-    per ticket op. Gebruikt stealth-modus om bot-detectie te omzeilen.
-    """
     print(f"  → Navigeren naar: {url}")
+
+    api_prices: list[float] = []
+    api_log: list[dict] = []
+
+    async def on_response(response):
+        try:
+            if "ticketswap" not in response.url:
+                return
+            ct = response.headers.get("content-type", "")
+            if "json" not in ct:
+                return
+            body = await response.json()
+            entry = {"url": response.url, "status": response.status, "body": body}
+            api_log.append(entry)
+            _extract_prices_from_obj(body, api_prices)
+        except Exception:
+            pass
+
+    page.on("response", on_response)
 
     try:
         await page.goto(url, wait_until="networkidle", timeout=60000)
-        # Scroll naar de doorverkoop-sectie zodat lazy loading triggert
-        await page.evaluate("window.scrollTo(0, 600)")
-        await page.wait_for_timeout(2000)
-        await page.evaluate("window.scrollTo(0, 1200)")
-        await page.wait_for_timeout(2000)
 
-        # Wacht tot een prijs zichtbaar is in de DOM (max 10s)
+        # Scroll stap voor stap naar beneden om lazy-loading te triggeren
+        for scroll_y in [400, 800, 1200]:
+            await page.evaluate(f"window.scrollTo(0, {scroll_y})")
+            await page.wait_for_timeout(1500)
+
+        # Wacht max 12s tot een prijs zichtbaar is in de DOM
         try:
             await page.wait_for_function(
-                r"""() => {
-                    const text = document.body.innerText || '';
-                    return /\u20ac\s*\d{1,3}[,.]\d{2}/.test(text);
-                }""",
-                timeout=10000,
+                r"""() => /\u20ac\s*\d{{1,3}}[,.]\d{{2}}/.test(document.body.innerText || '')""",
+                timeout=12000,
             )
             print("  ℹ Prijs zichtbaar in DOM")
         except Exception:
-            print("  ⚠ Geen prijs gevonden na wachten – doorgaan met wat er is")
+            print("  ⚠ Geen prijs in DOM na wachttijd")
 
-        # Extra wachttijd voor het geval er meer kaarten laden
         await page.wait_for_timeout(2000)
     except Exception as e:
         print(f"  ✗ Laden mislukt: {e}")
+        page.remove_listener("response", on_response)
         return None
+    finally:
+        page.remove_listener("response", on_response)
 
-    # Debug: sla screenshot + HTML op als DEBUG=1
+    # Debug: screenshot + HTML + API-log
     if debug_dir:
         debug_dir.mkdir(parents=True, exist_ok=True)
         slug = re.sub(r"[^a-z0-9]+", "_", url.rstrip("/").split("/")[-2])
         await page.screenshot(path=str(debug_dir / f"{slug}.png"), full_page=True)
         (debug_dir / f"{slug}.html").write_text(await page.content(), encoding="utf-8")
-        print(f"  ℹ Debug opgeslagen in {debug_dir}/{slug}.*")
+        api_log_path = debug_dir / f"{slug}_api.json"
+        api_log_path.write_text(
+            json.dumps(api_log, indent=2, default=str, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"  ℹ Debug: {len(api_log)} API-responses, {len(api_prices)} prijzen onderschept")
+        print(f"  ℹ API-log: {api_log_path}")
 
-    # Check of de foutmelding zichtbaar is (bot-detectie)
-    error_visible = await page.evaluate("""() => {
-        const text = document.body.innerText || '';
-        return text.includes('Er is iets misgegaan') || text.includes('something went wrong');
-    }""")
-    if error_visible:
-        print("  ⚠ TicketSwap toont foutmelding – bot-detectie actief. Probeer opnieuw met wachttijd.")
-        await page.wait_for_timeout(3000)
+    # Strategie 1: onderschepte API-prijzen
+    if api_prices:
+        uniq = sorted(set(api_prices))
+        print(f"  ℹ API-prijzen: {uniq}")
+        result = round(min(api_prices), 2)
+        print(f"  ✓ Laagste (API): €{result:.2f}")
+        return result
 
-    # Zoek alle prijzen op de pagina; de doorverkoop-kaarten staan in een feed
-    prices = await page.evaluate("""() => {
-        // Officiële prijs staat in een 'Officiële ticketshop' sectie
-        // De doorverkoop-feed staat erna als een lijst van kaarten
-        const officialRe = /officieel|official|face.?value|originele.?prijs|officiële.?ticketshop/i;
+    # Strategie 2: DOM-scraping
+    dom_prices: list[float] = await page.evaluate(r"""() => {
+        const officialRe = /officieel|official|face.?value|officiële.?ticketshop/i;
 
         function parsePrices(text) {
-            const prices = [];
-            // Matcht: €45,00 / €45.00 / € 45,00 / € 45.00
             const re = /\u20ac\s*(\d{1,3})[,.](\d{2})/g;
+            const out = [];
             let m;
             while ((m = re.exec(text)) !== null) {
                 const p = parseFloat(m[1] + '.' + m[2]);
-                if (p > 5 && p < 500) prices.push(p);
+                if (p > 5 && p < 500) out.push(p);
             }
-            return prices;
+            return out;
         }
 
-        // Strategie 1: zoek de doorverkoop-feed via data-testid of specifieke klassen
-        const feedSelectors = [
-            '[data-testid="listings"]',
-            '[data-testid="listing-list"]',
-            '[class*="ListingList"]',
-            '[class*="listing-list"]',
-            '[class*="listings-feed"]',
-            '[class*="ListingsFeed"]',
-            '[class*="AvailableListings"]',
-            '[class*="available-listings"]',
-        ];
-
-        for (const sel of feedSelectors) {
-            const el = document.querySelector(sel);
-            if (el) {
-                const prices = parsePrices(el.innerText || '');
-                if (prices.length > 0) {
-                    console.log('Feed via selector ' + sel + ':', prices);
-                    return prices;
+        // Sectie na 'Doorverkooptickets' kop
+        const headings = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6')];
+        for (const h of headings) {
+            if (/doorverkoop/i.test(h.innerText || '')) {
+                // Loop door volgende siblings
+                let el = h.nextElementSibling;
+                const sectionPrices = [];
+                while (el && !el.matches('h1,h2,h3,h4,h5,h6')) {
+                    if (!officialRe.test(el.innerText || '')) {
+                        sectionPrices.push(...parsePrices(el.innerText || ''));
+                    }
+                    el = el.nextElementSibling;
+                }
+                if (sectionPrices.length) {
+                    console.log('Doorverkoop sectie prijzen:', sectionPrices);
+                    return sectionPrices;
                 }
             }
         }
 
-        // Strategie 2: loop door alle secties en sla de officiële sectie over
-        // De doorverkoop-kaarten zitten na de 'Officiële ticketshop' kop
-        const sections = [...document.querySelectorAll('section, [class*="Section"], [class*="section"]')];
-        for (const section of sections) {
-            const headerText = section.querySelector('h1,h2,h3,h4')?.innerText || '';
-            if (officialRe.test(headerText)) continue;
-            const prices = parsePrices(section.innerText || '');
-            if (prices.length > 1) {
-                // Meerdere prijzen in één sectie = doorverkoop-feed
-                console.log('Feed via section:', prices);
-                return prices;
-            }
-        }
-
-        // Strategie 3: groepeer li/article-elementen per ouder,
-        // kies de groep met de meeste kaarten (= listings-feed)
+        // Groepeer li/article per ouder, pak grootste groep
         const candidates = [...document.querySelectorAll('li, article')].filter(el => {
             const text = el.innerText || '';
             if (!/\u20ac\s*\d/.test(text)) return false;
-            // Sla officiële elementen over (check zichzelf + 5 voorouders)
             let node = el;
             for (let i = 0; i < 5; i++) {
                 if (!node) break;
-                const t = (node.className || '') + ' ' + (node.getAttribute?.('aria-label') || '')
-                        + ' ' + (node.innerText || '').substring(0, 100);
-                if (officialRe.test(t)) return false;
+                if (officialRe.test((node.className || '') + ' ' + (node.getAttribute?.('aria-label') || ''))) return false;
                 node = node.parentElement;
             }
             return true;
@@ -151,52 +177,38 @@ async def get_lowest_resale_price(page, url: str, debug_dir: Path | None = None)
             groups.get(key).push(el);
         }
 
-        let bestGroup = [];
+        let best = [];
         for (const items of groups.values()) {
-            if (items.length > bestGroup.length) bestGroup = items;
+            if (items.length > best.length) best = items;
         }
 
-        if (bestGroup.length >= 1) {
-            const prices = [];
-            for (const el of bestGroup) {
-                prices.push(...parsePrices(el.innerText || ''));
-            }
-            if (prices.length > 0) {
-                console.log('Feed via groep (' + bestGroup.length + ' items):', prices);
-                return prices;
+        if (best.length) {
+            const pp = [];
+            for (const el of best) pp.push(...parsePrices(el.innerText || ''));
+            if (pp.length) {
+                console.log('DOM groep prijzen:', pp);
+                return pp;
             }
         }
 
-        // Strategie 4: fallback – verzamel alle prijzen maar sla officiële sectie over
-        const allText = document.body.innerText || '';
-        // Haal de officiële prijs-sectie eruit door te splitsen op de kop
-        const splitIdx = allText.indexOf('Officiële ticketshop');
-        let searchText = allText;
-        if (splitIdx >= 0) {
-            // Neem het stuk NA de officiële sectie (begin van volgende alinea)
-            const afterOfficial = allText.indexOf('\\n\\n', splitIdx + 30);
-            if (afterOfficial > 0) searchText = allText.substring(afterOfficial);
-        }
-
-        const fallbackPrices = parsePrices(searchText);
-        if (fallbackPrices.length > 0) {
-            console.log('Fallback pagina-prijzen:', fallbackPrices);
-            return fallbackPrices;
-        }
-
-        // Alles mislukken: log de volledige pagina-tekst voor debug
-        console.log('Volledige paginatekst (eerste 2000 tekens):', allText.substring(0, 2000));
-        return [];
+        // Volledig fallback: alle prijzen, sla officiële sectie over
+        const full = document.body.innerText || '';
+        const splitIdx = full.indexOf('Officiële ticketshop');
+        const afterIdx = splitIdx >= 0 ? full.indexOf('Doorverkoop', splitIdx) : -1;
+        const searchText = afterIdx >= 0 ? full.substring(afterIdx) : full;
+        const fallback = parsePrices(searchText);
+        console.log('Fallback prijzen:', fallback);
+        return fallback;
     }""")
 
-    if prices:
-        uniq = sorted(set(round(p, 2) for p in prices))
-        print(f"  ℹ Gevonden doorverkoop-prijzen: {uniq}")
-        result = round(min(prices), 2)
-        print(f"  ✓ Laagste doorverkoop: €{result:.2f} per ticket")
+    if dom_prices:
+        uniq = sorted(set(round(p, 2) for p in dom_prices))
+        print(f"  ℹ DOM-prijzen: {uniq}")
+        result = round(min(dom_prices), 2)
+        print(f"  ✓ Laagste (DOM): €{result:.2f}")
         return result
 
-    print("  ✗ Geen doorverkoop-listings gevonden")
+    print("  ✗ Geen doorverkoop-prijzen gevonden")
     return None
 
 
@@ -298,10 +310,7 @@ async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ],
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
         )
         context = await browser.new_context(
             user_agent=(
@@ -312,7 +321,6 @@ async def main():
             locale="nl-NL",
             timezone_id="Europe/Amsterdam",
             viewport={"width": 1280, "height": 900},
-            # Stel extra HTTP-headers in zoals een echte browser
             extra_http_headers={
                 "Accept-Language": "nl-NL,nl;q=0.9,en;q=0.8",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -322,11 +330,8 @@ async def main():
             },
         )
         page = await context.new_page()
-
-        # Activeer stealth-modus: verbergt tekenen van geautomatiseerde browser
         await stealth_async(page)
 
-        # Log browser console berichten voor debuggen
         page.on(
             "console",
             lambda msg: print(f"  [browser] {msg.text[:300]}")
@@ -360,7 +365,6 @@ async def main():
 
         await browser.close()
 
-    # Bewaar laatste 1440 metingen (~30 dagen bij 30min interval)
     price_data.append(new_entry)
     if len(price_data) > 1440:
         price_data = price_data[-1440:]
