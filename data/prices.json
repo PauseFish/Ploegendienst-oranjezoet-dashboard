@@ -68,5 +68,12 @@
     "ploegendienst_alerted": false,
     "oranjezoet_price": 63.71,
     "oranjezoet_alerted": false
+  },
+  {
+    "timestamp": "2026-04-05T19:00:14Z",
+    "ploegendienst_price": 63.71,
+    "ploegendienst_alerted": false,
+    "oranjezoet_price": 63.71,
+    "oranjezoet_alerted": false
   }
 ]
