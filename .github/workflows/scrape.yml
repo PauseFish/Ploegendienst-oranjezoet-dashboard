@@ -2,8 +2,8 @@ name: Scrape Ticket Prices
 
 on:
   schedule:
-    # Elke 2 uur (UTC)
-    - cron: '0 */2 * * *'
+    # Elke 30 minuten
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       reason:

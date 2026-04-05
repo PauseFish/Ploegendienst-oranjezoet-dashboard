@@ -301,11 +301,9 @@
         <label for="emailInput">E-mailadres voor alerts</label>
         <input type="email" id="emailInput" placeholder="jouw@email.com" />
       </div>
-      <div class="form-group">
-        <label for="thresholdInput">Drempelprijs voor 2 tickets (€)</label>
-        <input type="number" id="thresholdInput" min="0" step="1" placeholder="bijv. 100" />
-      </div>
     </div>
+
+    <div id="thresholdFields" style="margin-bottom:1.25rem"></div>
 
     <div class="btn-row">
       <button class="btn" onclick="saveSettings()">💾 Opslaan</button>
@@ -319,7 +317,7 @@
       <div class="info-box">
         <strong>Waarom een GitHub token?</strong><br>
         De instellingen (e-mail + drempel) worden opgeslagen in <code>config.json</code> in je
-        GitHub-repository. De scraper leest dit bestand elke 2 uur.<br><br>
+        GitHub-repository. De scraper leest dit bestand elke 30 minuten.<br><br>
         Om <em>via deze pagina</em> direct te kunnen opslaan heb je een
         <strong>Personal Access Token</strong> nodig:<br>
         1. Ga naar <strong>GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens</strong><br>
@@ -364,8 +362,7 @@ async function loadData() {
     const r = await fetch(`config.json?t=${Date.now()}`);
     if (r.ok) {
       configData = await r.json();
-      document.getElementById('emailInput').value     = configData.email     || '';
-      document.getElementById('thresholdInput').value = configData.threshold || '';
+      document.getElementById('emailInput').value = configData.email || '';
     }
   } catch (e) { console.warn('config.json niet geladen', e); }
 
@@ -374,9 +371,32 @@ async function loadData() {
     if (r.ok) priceData = await r.json();
   } catch (e) { console.warn('prices.json niet geladen', e); }
 
+  renderThresholdFields();
   renderCards();
   renderChart();
   updateStatus();
+}
+
+// ─── Drempel-inputs per evenement ────────────────────────────────────────────
+function renderThresholdFields() {
+  const events = configData.events || {};
+  const wrap   = document.getElementById('thresholdFields');
+  wrap.innerHTML = '';
+
+  const grid = document.createElement('div');
+  grid.className = 'form-grid';
+
+  for (const [key, ev] of Object.entries(events)) {
+    const group = document.createElement('div');
+    group.className = 'form-group';
+    group.innerHTML = `
+      <label for="thr_${key}">Drempel ${ev.name} (€ per ticket)</label>
+      <input type="number" id="thr_${key}" min="0" step="1"
+             placeholder="bijv. 50" value="${ev.threshold ?? ''}" />
+    `;
+    grid.appendChild(group);
+  }
+  wrap.appendChild(grid);
 }
 
 // ─── Event cards ────────────────────────────────────────────────────────────
@@ -389,36 +409,37 @@ function getLatestPrice(key) {
 }
 
 function renderCards() {
-  const threshold = parseFloat(configData.threshold) || 0;
-  const events    = configData.events || {};
-  const grid      = document.getElementById('eventGrid');
-  grid.innerHTML  = '';
+  const events   = configData.events || {};
+  const grid     = document.getElementById('eventGrid');
+  grid.innerHTML = '';
 
   for (const [key, ev] of Object.entries(events)) {
-    const price   = getLatestPrice(key);
-    const isBelow = price !== null && threshold > 0 && price < threshold;
-    const isAbove = price !== null && threshold > 0 && price >= threshold;
+    const price2        = getLatestPrice(key);                        // prijs voor 2 tickets
+    const pricePerTicket = price2 !== null ? price2 / 2 : null;
+    const threshold     = parseFloat(ev.threshold) || 0;             // drempel per ticket
+    const isBelow       = pricePerTicket !== null && threshold > 0 && pricePerTicket < threshold;
+    const isAbove       = pricePerTicket !== null && threshold > 0 && pricePerTicket >= threshold;
 
     let badgeClass, badgeText;
-    if (price === null)  { badgeClass = 'loading'; badgeText = 'Geen data'; }
+    if (price2 === null)   { badgeClass = 'loading'; badgeText = 'Geen data'; }
     else if (threshold === 0) { badgeClass = 'neutral'; badgeText = 'Geen drempel ingesteld'; }
-    else if (isBelow)    { badgeClass = 'below';   badgeText = '✓ Onder drempel!'; }
-    else                 { badgeClass = 'above';   badgeText = '↑ Boven drempel'; }
+    else if (isBelow)      { badgeClass = 'below';   badgeText = '✓ Onder drempel!'; }
+    else                   { badgeClass = 'above';   badgeText = '↑ Boven drempel'; }
 
-    const priceStr = price !== null
-      ? '€\u00a0' + price.toFixed(2).replace('.', ',')
-      : '–';
-
-    const subText = threshold > 0
-      ? `voor 2 tickets · drempel €${threshold.toFixed(0)}`
-      : 'voor 2 tickets';
+    const fmt = v => v !== null ? '€\u00a0' + v.toFixed(2).replace('.', ',') : '–';
 
     const card = document.createElement('div');
     card.className = 'event-card' + (isBelow ? ' is-below' : '');
     card.innerHTML = `
       <div class="label">${ev.name}</div>
-      <div class="price-big">${priceStr}</div>
-      <div class="price-sub">${subText}</div>
+      <div class="price-big">${fmt(price2)}</div>
+      <div class="price-sub" style="display:flex;gap:1rem">
+        <span>2 tickets</span>
+        ${pricePerTicket !== null ? `<span style="color:var(--accent)">${fmt(pricePerTicket)} p.p.</span>` : ''}
+      </div>
+      ${threshold > 0 ? `<div style="font-size:.78rem;color:var(--muted);margin-bottom:.6rem">
+        Drempel: ${fmt(threshold)} per ticket
+      </div>` : ''}
       <span class="badge ${badgeClass}">${badgeText}</span>
       <a class="event-link" href="${ev.url}" target="_blank">Bekijk op TicketSwap →</a>
     `;
@@ -445,8 +466,7 @@ function renderChart() {
 
   const events    = configData.events || {};
   const eventKeys = Object.keys(events);
-  const threshold = parseFloat(configData.threshold) || 0;
-  const dense     = priceData.length > 60;
+  const dense     = priceData.length > 120;
 
   const labels = priceData.map(d => {
     const dt = new Date(d.timestamp);
@@ -454,32 +474,37 @@ function renderChart() {
                                         hour: '2-digit', minute: '2-digit' });
   });
 
-  const palette = ['#ff6b35', '#4da6ff'];
+  const palette       = ['#ff6b35', '#4da6ff'];
+  const threshColors  = ['#4caf50', '#ab47bc'];
 
   const datasets = eventKeys.map((key, i) => ({
-    label:           events[key]?.name || key,
-    data:            priceData.map(d => d[key + '_price'] ?? null),
-    borderColor:     palette[i % palette.length],
-    backgroundColor: palette[i % palette.length] + '22',
-    tension:         0.35,
-    spanGaps:        true,
-    pointRadius:     dense ? 0 : 4,
+    label:            events[key]?.name || key,
+    data:             priceData.map(d => d[key + '_price'] ?? null),
+    borderColor:      palette[i % palette.length],
+    backgroundColor:  palette[i % palette.length] + '22',
+    tension:          0.35,
+    spanGaps:         true,
+    pointRadius:      dense ? 0 : 3,
     pointHoverRadius: 6,
-    borderWidth:     2,
-    fill:            false,
+    borderWidth:      2,
+    fill:             false,
   }));
 
-  if (threshold > 0) {
-    datasets.push({
-      label:        'Drempelprijs',
-      data:         priceData.map(() => threshold),
-      borderColor:  '#4caf50',
-      borderDash:   [7, 4],
-      borderWidth:  1.5,
-      pointRadius:  0,
-      fill:         false,
-    });
-  }
+  // Drempellijnen per evenement (per ticket × 2 = drempel voor 2 tickets op de grafiek)
+  eventKeys.forEach((key, i) => {
+    const thr = parseFloat(events[key]?.threshold) || 0;
+    if (thr > 0) {
+      datasets.push({
+        label:       `Drempel ${events[key]?.name || key}`,
+        data:        priceData.map(() => thr * 2),
+        borderColor: threshColors[i % threshColors.length],
+        borderDash:  [7, 4],
+        borderWidth: 1.5,
+        pointRadius: 0,
+        fill:        false,
+      });
+    }
+  });
 
   if (chart) chart.destroy();
 
@@ -542,15 +567,23 @@ function showFeedback(type, msg) {
 }
 
 async function saveSettings() {
-  const email     = document.getElementById('emailInput').value.trim();
-  const threshold = parseFloat(document.getElementById('thresholdInput').value);
-  const token     = document.getElementById('githubToken').value.trim();
+  const email  = document.getElementById('emailInput').value.trim();
+  const token  = document.getElementById('githubToken').value.trim();
 
-  if (!email)              return showFeedback('error', 'Vul een e-mailadres in.');
-  if (isNaN(threshold) || threshold < 0)
-                           return showFeedback('error', 'Vul een geldige drempelprijs in.');
+  if (!email) return showFeedback('error', 'Vul een e-mailadres in.');
 
-  const updated = { ...configData, email, threshold };
+  // Lees drempel per evenement uit de dynamisch gegenereerde inputs
+  const updatedEvents = JSON.parse(JSON.stringify(configData.events || {}));
+  for (const key of Object.keys(updatedEvents)) {
+    const input = document.getElementById(`thr_${key}`);
+    if (input) {
+      const val = parseFloat(input.value);
+      if (isNaN(val) || val < 0) return showFeedback('error', `Ongeldige drempelprijs voor ${updatedEvents[key].name}.`);
+      updatedEvents[key].threshold = val;
+    }
+  }
+
+  const updated = { ...configData, email, events: updatedEvents };
 
   if (token) {
     try {

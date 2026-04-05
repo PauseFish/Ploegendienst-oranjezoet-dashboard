@@ -1,15 +1,16 @@
 {
   "email": "jouw@email.com",
-  "threshold": 100,
   "github_pages_url": "pausefish.github.io/ploegendienst-oranjezoet-dashboard",
   "events": {
     "ploegendienst": {
       "name": "Ploegendienst Kingsnight Special 2026",
-      "url": "https://www.ticketswap.nl/event/ploegendienst-kingsnight-special/breda-2026"
+      "url": "https://www.ticketswap.nl/event/ploegendienst-kingsnight-special/breda-2026",
+      "threshold": 50
     },
     "oranjezoet": {
       "name": "Oranje Zoet 2026",
-      "url": "https://www.ticketswap.nl/festival-tickets/a/oranje-zoet"
+      "url": "https://www.ticketswap.nl/festival-tickets/a/oranje-zoet",
+      "threshold": 50
     }
   }
 }

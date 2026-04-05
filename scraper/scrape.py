@@ -115,14 +115,15 @@ def _should_send_alert(entries: list[dict], event_key: str) -> bool:
     return True
 
 
-def send_alert_email(config: dict, alerts: list[tuple[str, float]]):
-    """Verstuurt een e-mailalert als de prijs onder de drempel zakt."""
+def send_alert_email(config: dict, alerts: list[tuple[str, float, float]]):
+    """Verstuurt een e-mailalert als de prijs onder de drempel zakt.
+    alerts = [(event_name, price_2tickets, threshold_per_ticket), ...]
+    """
     smtp_server = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
     smtp_user = os.environ.get("SMTP_USER", "")
     smtp_password = os.environ.get("SMTP_PASSWORD", "")
     recipient = config.get("email", "")
-    threshold = config.get("threshold", 0)
     dashboard_url = config.get("github_pages_url", "#")
 
     if not all([smtp_user, smtp_password, recipient]):
@@ -134,9 +135,12 @@ def send_alert_email(config: dict, alerts: list[tuple[str, float]]):
 
     subject = "🎟 Prijsalert: tickets onder drempel!"
     rows = "".join(
-        f"<tr><td style='padding:8px 16px'>{name}</td>"
-        f"<td style='padding:8px 16px; font-weight:bold; color:#ff6b35'>€{price:.2f}</td></tr>"
-        for name, price in alerts
+        f"<tr>"
+        f"<td style='padding:8px 16px'>{name}</td>"
+        f"<td style='padding:8px 16px; font-weight:bold; color:#ff6b35'>€{price_2:.2f}</td>"
+        f"<td style='padding:8px 16px; color:#888'>€{price_2/2:.2f} p.p. · drempel €{thr:.2f}</td>"
+        f"</tr>"
+        for name, price_2, thr in alerts
     )
 
     html_body = f"""
@@ -144,13 +148,13 @@ def send_alert_email(config: dict, alerts: list[tuple[str, float]]):
       <div style="max-width:600px;margin:auto;background:#1a1a2e;border-radius:12px;
                   padding:2rem;border:1px solid #2a2a45">
         <h2 style="color:#ff6b35;margin-top:0">🎟 Prijsalert!</h2>
-        <p>De volgende tickets zijn onder jouw drempel van
-           <strong style="color:#ff6b35">€{threshold:.2f}</strong> gedaald:</p>
+        <p>De volgende tickets zijn onder jouw drempel gedaald:</p>
         <table style="width:100%;border-collapse:collapse;margin:1rem 0">
           <thead>
             <tr style="background:#0f0f1a;color:#888">
               <th style="padding:8px 16px;text-align:left">Evenement</th>
-              <th style="padding:8px 16px;text-align:left">Prijs (2 tickets)</th>
+              <th style="padding:8px 16px;text-align:left">2 tickets</th>
+              <th style="padding:8px 16px;text-align:left">Per ticket</th>
             </tr>
           </thead>
           <tbody>{rows}</tbody>
@@ -188,7 +192,6 @@ async def main():
     with open(base_dir / "config.json") as f:
         config = json.load(f)
 
-    threshold = float(config.get("threshold", 0))
     events = config.get("events", {})
 
     # Laad bestaande prijsdata
@@ -202,7 +205,7 @@ async def main():
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_entry: dict = {"timestamp": now_iso}
-    alerts_to_send: list[tuple[str, float]] = []
+    alerts_to_send: list[tuple[str, float, float]] = []  # (name, price_2tickets, threshold_per_ticket)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -231,23 +234,26 @@ async def main():
             price = await get_lowest_price_for_two_tickets(page, url)
             new_entry[f"{key}_price"] = price
 
-            # Controleer drempel
+            # Drempel is per ticket; price is voor 2 tickets
+            threshold_per_ticket = float(event_info.get("threshold", 0))
+            price_per_ticket = price / 2 if price is not None else None
+
             alert_flag = False
-            if price is not None and threshold > 0 and price < threshold:
+            if price_per_ticket is not None and threshold_per_ticket > 0 and price_per_ticket < threshold_per_ticket:
                 if _should_send_alert(price_data, key):
-                    alerts_to_send.append((name, price))
+                    alerts_to_send.append((name, price, threshold_per_ticket))
                     alert_flag = True
-                    print(f"  🔔 Alert: €{price:.2f} < drempel €{threshold:.2f}")
+                    print(f"  🔔 Alert: €{price_per_ticket:.2f}/ticket < drempel €{threshold_per_ticket:.2f}/ticket")
                 else:
                     print(f"  ℹ Al gewaarschuwd (cooldown actief)")
             new_entry[f"{key}_alerted"] = alert_flag
 
         await browser.close()
 
-    # Voeg nieuwe meting toe en beperk tot laatste 360 metingen (~30 dagen bij 2u interval)
+    # Voeg nieuwe meting toe en beperk tot laatste 1440 metingen (~30 dagen bij 30min interval)
     price_data.append(new_entry)
-    if len(price_data) > 360:
-        price_data = price_data[-360:]
+    if len(price_data) > 1440:
+        price_data = price_data[-1440:]
 
     with open(prices_path, "w") as f:
         json.dump(price_data, f, indent=2)
