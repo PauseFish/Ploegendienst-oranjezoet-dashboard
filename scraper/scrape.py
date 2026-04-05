@@ -29,10 +29,28 @@ async def get_lowest_resale_price(page, url: str, debug_dir: Path | None = None)
     print(f"  → Navigeren naar: {url}")
 
     try:
-        # Wacht op networkidle zodat de listings feed geladen is
         await page.goto(url, wait_until="networkidle", timeout=60000)
-        # Extra wachttijd zodat React de doorverkoop-kaarten rendert
-        await page.wait_for_timeout(4000)
+        # Scroll naar de doorverkoop-sectie zodat lazy loading triggert
+        await page.evaluate("window.scrollTo(0, 600)")
+        await page.wait_for_timeout(2000)
+        await page.evaluate("window.scrollTo(0, 1200)")
+        await page.wait_for_timeout(2000)
+
+        # Wacht tot een prijs zichtbaar is in de DOM (max 10s)
+        try:
+            await page.wait_for_function(
+                r"""() => {
+                    const text = document.body.innerText || '';
+                    return /\u20ac\s*\d{1,3}[,.]\d{2}/.test(text);
+                }""",
+                timeout=10000,
+            )
+            print("  ℹ Prijs zichtbaar in DOM")
+        except Exception:
+            print("  ⚠ Geen prijs gevonden na wachten – doorgaan met wat er is")
+
+        # Extra wachttijd voor het geval er meer kaarten laden
+        await page.wait_for_timeout(2000)
     except Exception as e:
         print(f"  ✗ Laden mislukt: {e}")
         return None
