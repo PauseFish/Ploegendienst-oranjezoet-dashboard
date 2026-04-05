@@ -16,10 +16,10 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 
-async def get_lowest_price_for_two_tickets(page, url: str) -> float | None:
+async def get_lowest_price_per_ticket(page, url: str) -> float | None:
     """
     Haalt de laagste beschikbare ticketprijs op van een TicketSwap-pagina
-    en geeft de prijs terug voor 2 tickets.
+    en geeft de prijs per ticket terug.
     """
     try:
         print(f"  → Navigeren naar: {url}")
@@ -72,10 +72,9 @@ async def get_lowest_price_for_two_tickets(page, url: str) -> float | None:
             print("  ✗ Geen prijzen gevonden op pagina")
             return None
 
-        min_price = min(prices)
-        total = round(min_price * 2, 2)
-        print(f"  ✓ Laagste prijs per ticket: €{min_price:.2f} → 2 tickets: €{total:.2f}")
-        return total
+        min_price = round(min(prices), 2)
+        print(f"  ✓ Laagste prijs per ticket: €{min_price:.2f}")
+        return min_price
 
     except Exception as exc:
         print(f"  ✗ Fout bij scrapen van {url}: {exc}")
@@ -138,7 +137,7 @@ def send_alert_email(config: dict, alerts: list[tuple[str, float, float]]):
         f"<tr>"
         f"<td style='padding:8px 16px'>{name}</td>"
         f"<td style='padding:8px 16px; font-weight:bold; color:#ff6b35'>€{price_2:.2f}</td>"
-        f"<td style='padding:8px 16px; color:#888'>€{price_2/2:.2f} p.p. · drempel €{thr:.2f}</td>"
+        f"<td style='padding:8px 16px; color:#888'>€{price_2*2:.2f} voor 2 · drempel €{thr:.2f}/ticket</td>"
         f"</tr>"
         for name, price_2, thr in alerts
     )
@@ -231,19 +230,17 @@ async def main():
                 new_entry[f"{key}_alerted"] = False
                 continue
 
-            price = await get_lowest_price_for_two_tickets(page, url)
-            new_entry[f"{key}_price"] = price
+            price = await get_lowest_price_per_ticket(page, url)
+            new_entry[f"{key}_price"] = price  # prijs per ticket
 
-            # Drempel is per ticket; price is voor 2 tickets
             threshold_per_ticket = float(event_info.get("threshold", 0))
-            price_per_ticket = price / 2 if price is not None else None
 
             alert_flag = False
-            if price_per_ticket is not None and threshold_per_ticket > 0 and price_per_ticket < threshold_per_ticket:
+            if price is not None and threshold_per_ticket > 0 and price < threshold_per_ticket:
                 if _should_send_alert(price_data, key):
                     alerts_to_send.append((name, price, threshold_per_ticket))
                     alert_flag = True
-                    print(f"  🔔 Alert: €{price_per_ticket:.2f}/ticket < drempel €{threshold_per_ticket:.2f}/ticket")
+                    print(f"  🔔 Alert: €{price:.2f}/ticket < drempel €{threshold_per_ticket:.2f}/ticket")
                 else:
                     print(f"  ℹ Al gewaarschuwd (cooldown actief)")
             new_entry[f"{key}_alerted"] = alert_flag

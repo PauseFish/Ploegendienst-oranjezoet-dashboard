@@ -414,17 +414,16 @@ function renderCards() {
   grid.innerHTML = '';
 
   for (const [key, ev] of Object.entries(events)) {
-    const price2        = getLatestPrice(key);                        // prijs voor 2 tickets
-    const pricePerTicket = price2 !== null ? price2 / 2 : null;
-    const threshold     = parseFloat(ev.threshold) || 0;             // drempel per ticket
-    const isBelow       = pricePerTicket !== null && threshold > 0 && pricePerTicket < threshold;
-    const isAbove       = pricePerTicket !== null && threshold > 0 && pricePerTicket >= threshold;
+    const pricePerTicket = getLatestPrice(key);           // prijs per ticket
+    const price2         = pricePerTicket !== null ? pricePerTicket * 2 : null;
+    const threshold      = parseFloat(ev.threshold) || 0;
+    const isBelow        = pricePerTicket !== null && threshold > 0 && pricePerTicket < threshold;
 
     let badgeClass, badgeText;
-    if (price2 === null)   { badgeClass = 'loading'; badgeText = 'Geen data'; }
-    else if (threshold === 0) { badgeClass = 'neutral'; badgeText = 'Geen drempel ingesteld'; }
-    else if (isBelow)      { badgeClass = 'below';   badgeText = '✓ Onder drempel!'; }
-    else                   { badgeClass = 'above';   badgeText = '↑ Boven drempel'; }
+    if (pricePerTicket === null)  { badgeClass = 'loading'; badgeText = 'Geen data'; }
+    else if (threshold === 0)     { badgeClass = 'neutral'; badgeText = 'Geen drempel ingesteld'; }
+    else if (isBelow)             { badgeClass = 'below';   badgeText = '✓ Onder drempel!'; }
+    else                          { badgeClass = 'above';   badgeText = '↑ Boven drempel'; }
 
     const fmt = v => v !== null ? '€\u00a0' + v.toFixed(2).replace('.', ',') : '–';
 
@@ -432,14 +431,14 @@ function renderCards() {
     card.className = 'event-card' + (isBelow ? ' is-below' : '');
     card.innerHTML = `
       <div class="label">${ev.name}</div>
-      <div class="price-big">${fmt(price2)}</div>
-      <div class="price-sub" style="display:flex;gap:1rem">
-        <span>2 tickets</span>
-        ${pricePerTicket !== null ? `<span style="color:var(--accent)">${fmt(pricePerTicket)} p.p.</span>` : ''}
+      <div class="price-big">${fmt(pricePerTicket)}</div>
+      <div class="price-sub" style="display:flex;gap:1rem;align-items:center">
+        <span>per ticket</span>
+        ${price2 !== null ? `<span style="color:var(--muted)">2× = ${fmt(price2)}</span>` : ''}
       </div>
-      ${threshold > 0 ? `<div style="font-size:.78rem;color:var(--muted);margin-bottom:.6rem">
+      ${threshold > 0 ? `<div style="font-size:.78rem;color:var(--muted);margin:.4rem 0 .6rem">
         Drempel: ${fmt(threshold)} per ticket
-      </div>` : ''}
+      </div>` : '<div style="margin-bottom:.6rem"></div>'}
       <span class="badge ${badgeClass}">${badgeText}</span>
       <a class="event-link" href="${ev.url}" target="_blank">Bekijk op TicketSwap →</a>
     `;
@@ -490,13 +489,13 @@ function renderChart() {
     fill:             false,
   }));
 
-  // Drempellijnen per evenement (per ticket × 2 = drempel voor 2 tickets op de grafiek)
+  // Drempellijnen per evenement (per ticket)
   eventKeys.forEach((key, i) => {
     const thr = parseFloat(events[key]?.threshold) || 0;
     if (thr > 0) {
       datasets.push({
         label:       `Drempel ${events[key]?.name || key}`,
-        data:        priceData.map(() => thr * 2),
+        data:        priceData.map(() => thr),
         borderColor: threshColors[i % threshColors.length],
         borderDash:  [7, 4],
         borderWidth: 1.5,
@@ -527,7 +526,7 @@ function renderChart() {
             callback: v => '€' + v.toFixed(0),
           },
           grid:  { color: '#2a2a45' },
-          title: { display: true, text: 'Prijs (2 tickets)', color: '#888', font: { size: 11 } },
+          title: { display: true, text: 'Prijs per ticket', color: '#888', font: { size: 11 } },
         },
       },
       plugins: {
