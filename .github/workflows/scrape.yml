@@ -33,11 +33,8 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r scraper/requirements.txt
 
-      - name: Install Playwright browsers
-        run: python -m playwright install chromium
-
-      - name: Install Playwright system dependencies
-        run: sudo python -m playwright install-deps chromium
+      - name: Install Playwright browsers en system dependencies
+        run: python -m playwright install --with-deps chromium
 
       - name: Run scraper
         run: python scraper/scrape.py
