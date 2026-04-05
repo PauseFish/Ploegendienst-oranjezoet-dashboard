@@ -10,6 +10,14 @@ on:
         description: 'Reden voor handmatige uitvoering'
         required: false
         default: 'Handmatige test'
+      debug:
+        description: 'Debug modus (screenshot + HTML opslaan)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 permissions:
   contents: write
@@ -39,11 +47,19 @@ jobs:
       - name: Run scraper
         run: python scraper/scrape.py
         env:
-          # Voeg deze secrets toe via GitHub → Settings → Secrets and variables → Actions
+          DEBUG: ${{ github.event.inputs.debug == 'true' && '1' || '0' }}
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+
+      - name: Upload debug artifacts
+        if: github.event.inputs.debug == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: debug/
+          retention-days: 3
 
       - name: Commit updated price data
         run: |

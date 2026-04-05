@@ -1,115 +1,263 @@
 """
 TicketSwap doorverkoop prijsscraper – Ploegendienst & Oranje Zoet 2026
 
-Strategie: zoek de groep list-items op de pagina met de meeste exemplaren
-die elk een prijs bevatten → dat is de doorverkoop-feed, niet de officiële prijs.
+Strategie (meerdere lagen):
+1. Onderschep GraphQL API-responses van TicketSwap (betrouwbaarst)
+2. Zoek prijzen in JSON-LD of window.__NEXT_DATA__
+3. Val terug op DOM-scraping van de doorverkoop-feed
 """
 
 import asyncio
 import json
 import os
+import re
 import smtplib
 from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Route
 
 
 # ─── Scraper ─────────────────────────────────────────────────────────────────
 
-async def get_lowest_resale_price(page, url: str) -> float | None:
+async def get_lowest_resale_price(page, url: str, debug_dir: Path | None = None) -> float | None:
     """
     Navigeert naar de TicketSwap-pagina en haalt de laagste doorverkoop-prijs
-    per ticket op. Negeert de officiële/face-value prijs.
+    per ticket op via API-onderschepping + DOM-fallback.
     """
     print(f"  → Navigeren naar: {url}")
+
+    api_prices: list[float] = []
+
+    async def handle_response(response):
+        """Onderschep TicketSwap API-responses voor prijzen."""
+        try:
+            resp_url = response.url
+            if "ticketswap" not in resp_url:
+                return
+            # GraphQL of listing endpoints
+            if not any(x in resp_url for x in ["graphql", "listing", "ticket", "event"]):
+                return
+            content_type = response.headers.get("content-type", "")
+            if "json" not in content_type:
+                return
+            body = await response.json()
+            _extract_prices_from_json(body, api_prices)
+        except Exception:
+            pass
+
+    page.on("response", handle_response)
+
     try:
         await page.goto(url, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(3000)
     except Exception as e:
         print(f"  ✗ Laden mislukt: {e}")
         return None
+    finally:
+        page.remove_listener("response", handle_response)
 
-    prices: list[float] = await page.evaluate("""() => {
-        // Prijs-regex: matcht €45,00 / €45.00 / € 45,00
-        const priceRe = /\u20ac\s*(\\d{1,3})[,.](\\d{2})/g;
+    # Debug: sla screenshot op als debug_dir opgegeven
+    if debug_dir:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        slug = re.sub(r"[^a-z0-9]+", "_", url.split("/")[-2] if "/" in url else "page")
+        screenshot_path = debug_dir / f"{slug}.png"
+        html_path = debug_dir / f"{slug}.html"
+        await page.screenshot(path=str(screenshot_path), full_page=True)
+        html_content = await page.content()
+        html_path.write_text(html_content, encoding="utf-8")
+        print(f"  ℹ Debug screenshot: {screenshot_path}")
+        print(f"  ℹ Debug HTML: {html_path} ({len(html_content)} bytes)")
 
-        // Sleutelwoorden die wijzen op de officiële verkoop – overslaan
-        const officialRe = /officieel|official|face.?value|originele.?prijs|gezichtswaarde|organisatie/i;
+    # Strategie 1: API-onderschepping
+    if api_prices:
+        uniq = sorted(set(round(p, 2) for p in api_prices))
+        print(f"  ℹ API-prijzen gevonden: {uniq}")
+        result = round(min(api_prices), 2)
+        print(f"  ✓ Laagste doorverkoop (API): €{result:.2f}")
+        return result
+
+    # Strategie 2: window.__NEXT_DATA__ of JSON-LD
+    next_prices = await page.evaluate("""() => {
+        const re = /(?:price|amount|cost)['"\\s]*[:=]['"\\s]*(\\d{1,3}[.,]\\d{2})/gi;
+        const officialRe = /officieel|official|face.?value|originele.?prijs|face_value/i;
+
+        function parseMoney(val) {
+            if (typeof val === 'number' && val > 5 && val < 500) return val;
+            if (typeof val === 'string') {
+                const n = parseFloat(val.replace(',', '.'));
+                if (n > 5 && n < 500) return n;
+            }
+            return null;
+        }
+
+        function walkJson(obj, prices, depth) {
+            if (depth > 15 || !obj) return;
+            if (Array.isArray(obj)) {
+                for (const item of obj) walkJson(item, prices, depth + 1);
+            } else if (typeof obj === 'object') {
+                // Sla officiële prijs blokken over
+                const keys = Object.keys(obj);
+                if (keys.some(k => officialRe.test(k))) return;
+                if (typeof obj.type === 'string' && officialRe.test(obj.type)) return;
+                for (const [k, v] of Object.entries(obj)) {
+                    if (/price|amount|total_price|buyer_price/i.test(k)) {
+                        const p = parseMoney(v);
+                        if (p !== null) prices.push(p);
+                    }
+                    walkJson(v, prices, depth + 1);
+                }
+            }
+        }
+
+        const prices = [];
+
+        // Probeer __NEXT_DATA__
+        try {
+            const nd = window.__NEXT_DATA__;
+            if (nd) walkJson(nd, prices, 0);
+        } catch(e) {}
+
+        // Probeer JSON-LD scripts
+        for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+            try {
+                walkJson(JSON.parse(s.textContent), prices, 0);
+            } catch(e) {}
+        }
+
+        return [...new Set(prices.map(p => Math.round(p * 100) / 100))].sort((a,b)=>a-b);
+    }""")
+
+    if next_prices and len(next_prices) > 0:
+        print(f"  ℹ __NEXT_DATA__/JSON-LD prijzen: {next_prices}")
+        # Filter face value: neem de laagste prijs die minder dan €80 is
+        cheap = [p for p in next_prices if p < 80]
+        if cheap:
+            result = round(min(cheap), 2)
+            print(f"  ✓ Laagste doorverkoop (data): €{result:.2f}")
+            return result
+
+    # Strategie 3: DOM-scraping
+    dom_prices = await page.evaluate("""() => {
+        const priceRe = /\u20ac\\s*(\\d{1,3})[,.]( \\d{2})/g;
+        const officialRe = /officieel|official|face.?value|originele.?prijs|gezichtswaarde|organisatie|normal.?price/i;
 
         function parsePrices(text) {
             const found = [];
+            // Matcht € 45,00 of €45.00
+            const re = /\u20ac\\s*(\\d{1,3})[,\\.](\\d{2})/g;
             let m;
-            priceRe.lastIndex = 0;
-            while ((m = priceRe.exec(text)) !== null) {
+            while ((m = re.exec(text)) !== null) {
                 const p = parseFloat(m[1] + '.' + m[2]);
                 if (p > 5 && p < 500) found.push(p);
             }
             return found;
         }
 
-        // --- Strategie 1: groepeer li/article-elementen per directe ouder ---
-        // De doorverkoop-feed bestaat uit MEERDERE kaarten in dezelfde ouder.
-        // De officiële prijs staat los (1 element of aparte sectie).
-        const candidates = [...document.querySelectorAll('li, article')].filter(el => {
-            const text = el.innerText || '';
-            if (!/\u20ac\s*\\d/.test(text)) return false;           // geen prijs
-            if (officialRe.test(text)) return false;                  // officieel
-            // Check ook aria-labels van voorouders
-            let p = el.parentElement;
-            for (let i = 0; i < 4; i++) {
-                if (!p) break;
-                const label = p.getAttribute('aria-label') || '';
-                if (officialRe.test(label)) return false;
-                p = p.parentElement;
+        function isOfficial(el) {
+            let node = el;
+            for (let i = 0; i < 6; i++) {
+                if (!node) break;
+                const t = (node.className || '') + ' ' + (node.getAttribute?.('aria-label') || '');
+                if (officialRe.test(t)) return true;
+                node = node.parentElement;
             }
-            return true;
+            return false;
+        }
+
+        // Zoek alle elementen met prijzen, groepeer per ouder
+        const all = [...document.querySelectorAll('*')].filter(el => {
+            if (el.children.length > 0) return false; // leaf nodes
+            const text = el.textContent || '';
+            return /\u20ac\\s*\\d/.test(text) && text.length < 50;
         });
 
-        // Groepeer per ouder-element
+        const debug = [];
         const groups = new Map();
-        for (const el of candidates) {
-            const key = el.parentElement || 'root';
-            if (!groups.has(key)) groups.set(key, []);
-            groups.get(key).push(el);
+        for (const el of all) {
+            const prices = parsePrices(el.textContent || '');
+            if (prices.length === 0) continue;
+            if (isOfficial(el)) continue;
+            const parent = el.parentElement?.parentElement || el.parentElement || document.body;
+            if (!groups.has(parent)) groups.set(parent, []);
+            groups.get(parent).push(...prices);
+            debug.push({ text: (el.textContent||'').trim(), prices, tag: el.tagName });
         }
 
-        // Kies de grootste groep (meeste kaarten = listings-feed)
-        let bestGroup = [];
-        for (const items of groups.values()) {
-            if (items.length > bestGroup.length) bestGroup = items;
+        // Log debug info
+        console.log('DOM debug entries:', JSON.stringify(debug.slice(0, 30)));
+
+        // Flatten all non-official prices
+        const allPrices = [];
+        for (const prices of groups.values()) {
+            allPrices.push(...prices);
         }
 
-        if (bestGroup.length >= 1) {
-            const found = [];
-            for (const el of bestGroup) {
-                found.push(...parsePrices(el.innerText || ''));
-            }
-            if (found.length > 0) return found;
-        }
-
-        // --- Strategie 2: zoek sectie met 'listing'/'beschikbaar' in class/id ---
-        const sectionEl = [...document.querySelectorAll('[class*="listing"],[class*="Listing"],[id*="listing"],[class*="beschikbaar"]')].find(el => {
-            const text = el.innerText || '';
-            return /\u20ac\s*\\d/.test(text) && !officialRe.test(text);
-        });
-        if (sectionEl) return parsePrices(sectionEl.innerText || '');
-
-        return [];
+        return [...new Set(allPrices.map(p => Math.round(p*100)/100))].sort((a,b)=>a-b);
     }""")
 
-    if not prices:
-        print("  ✗ Geen doorverkoop-listings gevonden")
-        return None
+    if dom_prices:
+        print(f"  ℹ DOM-prijzen: {dom_prices}")
+        result = round(min(dom_prices), 2)
+        print(f"  ✓ Laagste doorverkoop (DOM): €{result:.2f}")
+        return result
 
-    # Log alle gevonden prijzen voor debuggen
-    uniq = sorted(set(round(p, 2) for p in prices))
-    print(f"  ℹ Gevonden doorverkoop-prijzen: {uniq}")
-    result = round(min(prices), 2)
-    print(f"  ✓ Laagste doorverkoop: €{result:.2f} per ticket")
-    return result
+    # Strategie 4: alles – pak laagste prijs van volledige pagina
+    all_prices = await page.evaluate("""() => {
+        const text = document.body.innerText || '';
+        const re = /\u20ac\\s*(\\d{1,3})[,\\.](\\d{2})/g;
+        const prices = [];
+        let m;
+        while ((m = re.exec(text)) !== null) {
+            const p = parseFloat(m[1] + '.' + m[2]);
+            if (p > 5 && p < 500) prices.push(p);
+        }
+        console.log('Alle paginaprijzen:', [...new Set(prices)].sort((a,b)=>a-b));
+        return [...new Set(prices.map(p => Math.round(p*100)/100))].sort((a,b)=>a-b);
+    }""")
+
+    if all_prices:
+        print(f"  ℹ Alle paginaprijzen: {all_prices}")
+        # Neem de laagste prijs als doorverkoop-indicatie
+        result = round(min(all_prices), 2)
+        print(f"  ✓ Laagste prijs (fallback): €{result:.2f}")
+        return result
+
+    print("  ✗ Geen prijzen gevonden op pagina")
+    return None
+
+
+def _extract_prices_from_json(obj, prices: list, depth: int = 0):
+    """Doorzoek een JSON-object recursief op prijsvelden."""
+    if depth > 15 or obj is None:
+        return
+    official_re = re.compile(
+        r"officieel|official|face.?value|originele.?prijs|face_value", re.I
+    )
+    if isinstance(obj, list):
+        for item in obj:
+            _extract_prices_from_json(item, prices, depth + 1)
+    elif isinstance(obj, dict):
+        # Sla secties over die de officiële prijs beschrijven
+        type_val = obj.get("type") or obj.get("__typename") or ""
+        if official_re.search(str(type_val)):
+            return
+        for k, v in obj.items():
+            if official_re.search(k):
+                continue
+            if re.search(r"price|amount|buyer_price|total_price", k, re.I):
+                if isinstance(v, (int, float)) and 5 < v < 500:
+                    prices.append(round(float(v), 2))
+                elif isinstance(v, str):
+                    try:
+                        n = float(v.replace(",", "."))
+                        if 5 < n < 500:
+                            prices.append(round(n, 2))
+                    except ValueError:
+                        pass
+            _extract_prices_from_json(v, prices, depth + 1)
 
 
 # ─── Alert-cooldown ───────────────────────────────────────────────────────────
@@ -200,6 +348,11 @@ async def main():
     else:
         price_data = []
 
+    # Debug-map: alleen opslaan als DEBUG=1 omgevingsvariabele is ingesteld
+    debug_dir: Path | None = None
+    if os.environ.get("DEBUG") == "1":
+        debug_dir = base_dir / "debug"
+
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_entry: dict = {"timestamp": now_iso}
     alerts_to_send: list[tuple[str, float, float]] = []
@@ -217,6 +370,9 @@ async def main():
         )
         page = await context.new_page()
 
+        # Log browser console messages voor debuggen
+        page.on("console", lambda msg: print(f"  [browser] {msg.text[:200]}") if msg.type in ("log", "warn", "error") else None)
+
         for key, event_info in config.get("events", {}).items():
             name = event_info.get("name", key)
             url  = event_info.get("url", "")
@@ -227,7 +383,7 @@ async def main():
                 new_entry[f"{key}_alerted"] = False
                 continue
 
-            price = await get_lowest_resale_price(page, url)
+            price = await get_lowest_resale_price(page, url, debug_dir=debug_dir)
             new_entry[f"{key}_price"] = price
 
             threshold = float(event_info.get("threshold", 0))
