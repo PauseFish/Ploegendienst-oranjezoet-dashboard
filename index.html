@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ticket Prijstracker – Ploegendienst & Oranje Zoet 2026</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg:        #0f0f1a;
+      --card:      #1a1a2e;
+      --border:    #2a2a45;
+      --accent:    #ff6b35;
+      --blue:      #4da6ff;
+      --green:     #4caf50;
+      --red:       #f44336;
+      --text:      #e0e0e0;
+      --muted:     #888;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      padding: 2rem 1.5rem 1.5rem;
+      text-align: center;
+      border-bottom: 2px solid var(--accent);
+    }
+    header h1 { font-size: 1.75rem; color: var(--accent); margin-bottom: .4rem; }
+    header p  { color: var(--muted); font-size: .9rem; }
+
+    /* ── Layout ── */
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 2rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    /* ── Cards ── */
+    .event-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.25rem;
+    }
+
+    .event-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1.5rem;
+      transition: transform .2s, border-color .2s, box-shadow .2s;
+    }
+    .event-card:hover    { transform: translateY(-3px); border-color: var(--accent); }
+    .event-card.is-below {
+      border-color: var(--green);
+      box-shadow: 0 0 24px rgba(76,175,80,.25);
+    }
+
+    .event-card .label {
+      font-size: .75rem;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+      margin-bottom: .6rem;
+    }
+    .event-card .price-big {
+      font-size: 2.6rem;
+      font-weight: 700;
+      line-height: 1;
+      margin-bottom: .25rem;
+    }
+    .event-card .price-sub {
+      font-size: .82rem;
+      color: var(--muted);
+      margin-bottom: 1rem;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: .35rem;
+      padding: .3rem .8rem;
+      border-radius: 20px;
+      font-size: .8rem;
+      font-weight: 600;
+    }
+    .badge.above   { background: rgba(244,67,54,.14); color: var(--red); }
+    .badge.below   { background: rgba(76,175,80,.14); color: var(--green); }
+    .badge.neutral { background: rgba(255,107,53,.14); color: var(--accent); }
+    .badge.loading { background: rgba(136,136,136,.14); color: var(--muted); }
+
+    .event-link {
+      display: block;
+      margin-top: 1rem;
+      font-size: .82rem;
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .event-link:hover { text-decoration: underline; }
+
+    /* ── Chart ── */
+    .section-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1.5rem;
+    }
+    .section-card h2 {
+      font-size: 1rem;
+      margin-bottom: 1.25rem;
+      color: var(--text);
+    }
+
+    .chart-wrap {
+      position: relative;
+      height: 320px;
+    }
+
+    .no-data {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 200px;
+      color: var(--muted);
+      font-size: .9rem;
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    /* ── Settings ── */
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .form-group { display: flex; flex-direction: column; gap: .4rem; }
+
+    .form-group label {
+      font-size: .75rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--muted);
+    }
+
+    .form-group input {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: .7rem 1rem;
+      font-size: .95rem;
+      transition: border-color .2s;
+    }
+    .form-group input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .form-group input::placeholder { color: var(--muted); }
+
+    .btn-row { display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: .7rem 1.4rem;
+      font-size: .9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .2s;
+    }
+    .btn:hover    { opacity: .88; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+    .btn-ghost {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .btn-ghost:hover { border-color: var(--muted); color: var(--text); }
+
+    .toggle-link {
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-size: .82rem;
+      cursor: pointer;
+      text-decoration: underline;
+      padding: 0;
+    }
+    .toggle-link:hover { color: var(--text); }
+
+    /* ── Advanced section ── */
+    .advanced {
+      display: none;
+      margin-top: 1.25rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid var(--border);
+    }
+    .advanced.open { display: block; }
+
+    .info-box {
+      background: rgba(255,107,53,.07);
+      border: 1px solid rgba(255,107,53,.2);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      font-size: .84rem;
+      color: var(--muted);
+      line-height: 1.65;
+      margin-bottom: 1rem;
+    }
+    .info-box strong { color: var(--accent); }
+    .info-box a { color: var(--accent); }
+
+    /* ── Feedback message ── */
+    .feedback {
+      display: none;
+      margin-top: .85rem;
+      padding: .7rem 1rem;
+      border-radius: 8px;
+      font-size: .87rem;
+    }
+    .feedback.success { display: block; background: rgba(76,175,80,.13); color: var(--green); }
+    .feedback.error   { display: block; background: rgba(244,67,54,.13); color: var(--red); }
+    .feedback.info    { display: block; background: rgba(255,107,53,.12); color: var(--accent); }
+
+    /* ── Status bar ── */
+    .status-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: .5rem;
+      margin-top: 1.25rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      font-size: .78rem;
+      color: var(--muted);
+    }
+    .status-bar a { color: var(--accent); text-decoration: none; }
+    .status-bar a:hover { text-decoration: underline; }
+
+    /* ── Responsive ── */
+    @media (max-width: 600px) {
+      header h1 { font-size: 1.3rem; }
+      .event-card .price-big { font-size: 2rem; }
+      main { padding: 1rem .75rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🎟 Ticket Prijstracker</h1>
+  <p>Ploegendienst Kingsnight Special &amp; Oranje Zoet 2026 · Breda</p>
+</header>
+
+<main>
+
+  <!-- ── Event cards ── -->
+  <div class="event-grid" id="eventGrid">
+    <div class="event-card"><div class="label">Laden...</div></div>
+    <div class="event-card"><div class="label">Laden...</div></div>
+  </div>
+
+  <!-- ── Chart ── -->
+  <div class="section-card">
+    <h2>Prijsverloop (2 tickets)</h2>
+    <div class="chart-wrap">
+      <canvas id="priceChart"></canvas>
+      <div class="no-data" id="noData" style="display:none">
+        Nog geen prijsdata beschikbaar.<br>
+        Wacht op de eerste automatische controle via GitHub Actions.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Settings ── -->
+  <div class="section-card">
+    <h2>⚙ Instellingen</h2>
+
+    <div class="form-grid">
+      <div class="form-group">
+        <label for="emailInput">E-mailadres voor alerts</label>
+        <input type="email" id="emailInput" placeholder="jouw@email.com" />
+      </div>
+      <div class="form-group">
+        <label for="thresholdInput">Drempelprijs voor 2 tickets (€)</label>
+        <input type="number" id="thresholdInput" min="0" step="1" placeholder="bijv. 100" />
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn" onclick="saveSettings()">💾 Opslaan</button>
+      <button class="toggle-link" onclick="toggleAdvanced()">Geavanceerd (GitHub token) ▾</button>
+    </div>
+
+    <div class="feedback" id="feedback"></div>
+
+    <!-- Advanced: GitHub API token -->
+    <div class="advanced" id="advancedSection">
+      <div class="info-box">
+        <strong>Waarom een GitHub token?</strong><br>
+        De instellingen (e-mail + drempel) worden opgeslagen in <code>config.json</code> in je
+        GitHub-repository. De scraper leest dit bestand elke 2 uur.<br><br>
+        Om <em>via deze pagina</em> direct te kunnen opslaan heb je een
+        <strong>Personal Access Token</strong> nodig:<br>
+        1. Ga naar <strong>GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens</strong><br>
+        2. Klik <strong>Generate new token</strong><br>
+        3. Stel onder <em>Repository permissions</em> → <em>Contents</em> in op <strong>Read and write</strong><br>
+        4. Plak het token hieronder — het wordt alleen lokaal opgeslagen in je browser.
+      </div>
+      <div class="form-group" style="max-width:480px; margin-bottom:1rem">
+        <label for="githubToken">GitHub Personal Access Token</label>
+        <input type="password" id="githubToken" placeholder="github_pat_..." autocomplete="off" />
+      </div>
+      <div style="font-size:.82rem; color:var(--muted)">
+        Geen token?
+        <a id="downloadLink" href="#" style="color:var(--accent)">Download config.json</a>
+        en upload het handmatig via GitHub → jouw repo → config.json → het potlood-icoon.
+      </div>
+    </div>
+
+    <div class="status-bar">
+      <span id="lastChecked">Laatste controle: ophalen…</span>
+      <a id="actionsLink"
+         href="https://github.com/pausefish/ploegendienst-oranjezoet-dashboard/actions"
+         target="_blank">GitHub Actions bekijken →</a>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ─── Configuratie ───────────────────────────────────────────────────────────
+const REPO_OWNER = 'pausefish';
+const REPO_NAME  = 'ploegendienst-oranjezoet-dashboard';
+const BRANCH     = 'main';
+
+let configData = {};
+let priceData  = [];
+let chart      = null;
+
+// ─── Data laden ─────────────────────────────────────────────────────────────
+async function loadData() {
+  try {
+    const r = await fetch(`config.json?t=${Date.now()}`);
+    if (r.ok) {
+      configData = await r.json();
+      document.getElementById('emailInput').value     = configData.email     || '';
+      document.getElementById('thresholdInput').value = configData.threshold || '';
+    }
+  } catch (e) { console.warn('config.json niet geladen', e); }
+
+  try {
+    const r = await fetch(`data/prices.json?t=${Date.now()}`);
+    if (r.ok) priceData = await r.json();
+  } catch (e) { console.warn('prices.json niet geladen', e); }
+
+  renderCards();
+  renderChart();
+  updateStatus();
+}
+
+// ─── Event cards ────────────────────────────────────────────────────────────
+function getLatestPrice(key) {
+  for (let i = priceData.length - 1; i >= 0; i--) {
+    const v = priceData[i][key + '_price'];
+    if (v !== null && v !== undefined) return v;
+  }
+  return null;
+}
+
+function renderCards() {
+  const threshold = parseFloat(configData.threshold) || 0;
+  const events    = configData.events || {};
+  const grid      = document.getElementById('eventGrid');
+  grid.innerHTML  = '';
+
+  for (const [key, ev] of Object.entries(events)) {
+    const price   = getLatestPrice(key);
+    const isBelow = price !== null && threshold > 0 && price < threshold;
+    const isAbove = price !== null && threshold > 0 && price >= threshold;
+
+    let badgeClass, badgeText;
+    if (price === null)  { badgeClass = 'loading'; badgeText = 'Geen data'; }
+    else if (threshold === 0) { badgeClass = 'neutral'; badgeText = 'Geen drempel ingesteld'; }
+    else if (isBelow)    { badgeClass = 'below';   badgeText = '✓ Onder drempel!'; }
+    else                 { badgeClass = 'above';   badgeText = '↑ Boven drempel'; }
+
+    const priceStr = price !== null
+      ? '€\u00a0' + price.toFixed(2).replace('.', ',')
+      : '–';
+
+    const subText = threshold > 0
+      ? `voor 2 tickets · drempel €${threshold.toFixed(0)}`
+      : 'voor 2 tickets';
+
+    const card = document.createElement('div');
+    card.className = 'event-card' + (isBelow ? ' is-below' : '');
+    card.innerHTML = `
+      <div class="label">${ev.name}</div>
+      <div class="price-big">${priceStr}</div>
+      <div class="price-sub">${subText}</div>
+      <span class="badge ${badgeClass}">${badgeText}</span>
+      <a class="event-link" href="${ev.url}" target="_blank">Bekijk op TicketSwap →</a>
+    `;
+    grid.appendChild(card);
+  }
+
+  if (!Object.keys(events).length) {
+    grid.innerHTML = '<div style="color:var(--muted);padding:1rem">Configuratie laden…</div>';
+  }
+}
+
+// ─── Grafiek ────────────────────────────────────────────────────────────────
+function renderChart() {
+  const ctx    = document.getElementById('priceChart').getContext('2d');
+  const noData = document.getElementById('noData');
+
+  if (!priceData.length) {
+    noData.style.display = 'flex';
+    document.getElementById('priceChart').style.display = 'none';
+    return;
+  }
+  noData.style.display = 'none';
+  document.getElementById('priceChart').style.display = 'block';
+
+  const events    = configData.events || {};
+  const eventKeys = Object.keys(events);
+  const threshold = parseFloat(configData.threshold) || 0;
+  const dense     = priceData.length > 60;
+
+  const labels = priceData.map(d => {
+    const dt = new Date(d.timestamp);
+    return dt.toLocaleString('nl-NL', { day: 'numeric', month: 'short',
+                                        hour: '2-digit', minute: '2-digit' });
+  });
+
+  const palette = ['#ff6b35', '#4da6ff'];
+
+  const datasets = eventKeys.map((key, i) => ({
+    label:           events[key]?.name || key,
+    data:            priceData.map(d => d[key + '_price'] ?? null),
+    borderColor:     palette[i % palette.length],
+    backgroundColor: palette[i % palette.length] + '22',
+    tension:         0.35,
+    spanGaps:        true,
+    pointRadius:     dense ? 0 : 4,
+    pointHoverRadius: 6,
+    borderWidth:     2,
+    fill:            false,
+  }));
+
+  if (threshold > 0) {
+    datasets.push({
+      label:        'Drempelprijs',
+      data:         priceData.map(() => threshold),
+      borderColor:  '#4caf50',
+      borderDash:   [7, 4],
+      borderWidth:  1.5,
+      pointRadius:  0,
+      fill:         false,
+    });
+  }
+
+  if (chart) chart.destroy();
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      interaction:         { mode: 'index', intersect: false },
+      scales: {
+        x: {
+          ticks: { color: '#888', maxTicksLimit: 10, maxRotation: 30, font: { size: 11 } },
+          grid:  { color: '#2a2a45' },
+        },
+        y: {
+          ticks: {
+            color: '#888',
+            font:  { size: 11 },
+            callback: v => '€' + v.toFixed(0),
+          },
+          grid:  { color: '#2a2a45' },
+          title: { display: true, text: 'Prijs (2 tickets)', color: '#888', font: { size: 11 } },
+        },
+      },
+      plugins: {
+        legend: {
+          labels: { color: '#e0e0e0', padding: 20, font: { size: 12 } },
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const v = ctx.parsed.y;
+              return ` ${ctx.dataset.label}: ${v !== null ? '€' + v.toFixed(2).replace('.', ',') : '–'}`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+// ─── Status ─────────────────────────────────────────────────────────────────
+function updateStatus() {
+  const el = document.getElementById('lastChecked');
+  if (priceData.length) {
+    const dt = new Date(priceData[priceData.length - 1].timestamp);
+    el.textContent = 'Laatste controle: ' + dt.toLocaleString('nl-NL');
+  } else {
+    el.textContent = 'Nog geen data beschikbaar';
+  }
+}
+
+// ─── Instellingen opslaan ───────────────────────────────────────────────────
+function showFeedback(type, msg) {
+  const el = document.getElementById('feedback');
+  el.className = 'feedback ' + type;
+  el.textContent = msg;
+  if (type !== 'error') setTimeout(() => { el.style.display = 'none'; }, 6000);
+}
+
+async function saveSettings() {
+  const email     = document.getElementById('emailInput').value.trim();
+  const threshold = parseFloat(document.getElementById('thresholdInput').value);
+  const token     = document.getElementById('githubToken').value.trim();
+
+  if (!email)              return showFeedback('error', 'Vul een e-mailadres in.');
+  if (isNaN(threshold) || threshold < 0)
+                           return showFeedback('error', 'Vul een geldige drempelprijs in.');
+
+  const updated = { ...configData, email, threshold };
+
+  if (token) {
+    try {
+      const apiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/config.json`;
+      const getRes = await fetch(apiUrl, {
+        headers: { Authorization: `token ${token}`, Accept: 'application/vnd.github.v3+json' },
+      });
+      if (!getRes.ok) throw new Error('Kon config.json niet ophalen – klopt het token?');
+      const { sha } = await getRes.json();
+
+      const content = btoa(unescape(encodeURIComponent(JSON.stringify(updated, null, 2))));
+      const putRes = await fetch(apiUrl, {
+        method: 'PUT',
+        headers: {
+          Authorization: `token ${token}`,
+          Accept: 'application/vnd.github.v3+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: 'chore: update instellingen via dashboard',
+          content,
+          sha,
+          branch: BRANCH,
+        }),
+      });
+      if (!putRes.ok) {
+        const err = await putRes.json();
+        throw new Error(err.message || 'Opslaan mislukt');
+      }
+      localStorage.setItem('ghtoken', token);
+      configData = updated;
+      showFeedback('success', '✓ Instellingen opgeslagen in GitHub! Volgende controle gebruikt de nieuwe drempel.');
+      renderCards();
+      renderChart();
+    } catch (err) {
+      showFeedback('error', 'Fout: ' + err.message);
+    }
+  } else {
+    // Geen token – sla lokaal op en bied download aan
+    configData = updated;
+    renderCards();
+    renderChart();
+    showFeedback('info',
+      'Instellingen lokaal bijgewerkt. Voer een GitHub token in (zie Geavanceerd) om ook de e-mailalerts bij te werken, of download config.json en upload die handmatig.');
+  }
+}
+
+// ─── Advanced toggle ────────────────────────────────────────────────────────
+function toggleAdvanced() {
+  const section = document.getElementById('advancedSection');
+  const btn     = document.querySelector('.toggle-link');
+  const open    = section.classList.toggle('open');
+  btn.textContent = open ? 'Geavanceerd (GitHub token) ▴' : 'Geavanceerd (GitHub token) ▾';
+}
+
+// ─── Download config.json ───────────────────────────────────────────────────
+document.getElementById('downloadLink').addEventListener('click', e => {
+  e.preventDefault();
+  const email     = document.getElementById('emailInput').value.trim();
+  const threshold = parseFloat(document.getElementById('thresholdInput').value) || 0;
+  const obj       = { ...configData, email, threshold };
+  const blob      = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+  const a         = Object.assign(document.createElement('a'), {
+    href:     URL.createObjectURL(blob),
+    download: 'config.json',
+  });
+  a.click();
+});
+
+// ─── Herstel opgeslagen token ────────────────────────────────────────────────
+const saved = localStorage.getItem('ghtoken');
+if (saved) document.getElementById('githubToken').value = saved;
+
+// ─── Start ───────────────────────────────────────────────────────────────────
+loadData();
+</script>
+
+</body>
+</html>

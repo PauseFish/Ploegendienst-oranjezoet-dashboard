@@ -1,0 +1,54 @@
+name: Scrape Ticket Prices
+
+on:
+  schedule:
+    # Elke 2 uur (UTC)
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reden voor handmatige uitvoering'
+        required: false
+        default: 'Handmatige test'
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Install Playwright browsers
+        run: python -m playwright install chromium --with-deps
+
+      - name: Run scraper
+        run: python scraper/scrape.py
+        env:
+          # Voeg deze secrets toe via GitHub → Settings → Secrets and variables → Actions
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+
+      - name: Commit updated price data
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add data/prices.json
+          git diff --staged --quiet || git commit -m "chore: update ticket prices $(date -u '+%Y-%m-%d %H:%M UTC') [skip ci]"
+          git push
