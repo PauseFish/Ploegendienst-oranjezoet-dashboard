@@ -5437,5 +5437,12 @@
     "ploegendienst_alerted": false,
     "oranjezoet_price": null,
     "oranjezoet_alerted": false
+  },
+  {
+    "timestamp": "2026-06-05T10:51:23Z",
+    "ploegendienst_price": null,
+    "ploegendienst_alerted": false,
+    "oranjezoet_price": null,
+    "oranjezoet_alerted": false
   }
 ]
