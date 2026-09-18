@@ -1,12 +1,5 @@
 [
   {
-    "timestamp": "2026-05-16T03:54:21Z",
-    "ploegendienst_price": null,
-    "ploegendienst_alerted": false,
-    "oranjezoet_price": null,
-    "oranjezoet_alerted": false
-  },
-  {
     "timestamp": "2026-05-16T06:26:26Z",
     "ploegendienst_price": null,
     "ploegendienst_alerted": false,
@@ -10074,6 +10067,13 @@
   },
   {
     "timestamp": "2026-09-18T10:54:00Z",
+    "ploegendienst_price": null,
+    "ploegendienst_alerted": false,
+    "oranjezoet_price": null,
+    "oranjezoet_alerted": false
+  },
+  {
+    "timestamp": "2026-09-18T14:52:25Z",
     "ploegendienst_price": null,
     "ploegendienst_alerted": false,
     "oranjezoet_price": null,
